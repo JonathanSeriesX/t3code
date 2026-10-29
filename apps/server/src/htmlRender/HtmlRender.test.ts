@@ -316,17 +316,23 @@ describe("HtmlRender", () => {
     },
   );
 
-  // A browser T3 cannot signal, as under AppArmor in an LXC container, must still exit.
-  it.live("asks the browser to close when the preview finishes instead of signalling it", () =>
-    Effect.gen(function* () {
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-fake-browser-" });
-      const executable = path.join(directory, "chrome-headless-shell");
-      const exitRecord = path.join(directory, "exited");
-      yield* fileSystem.writeFileString(
-        executable,
-        `#!${process.execPath}
+  // The fake browser is a shebang script, which Windows cannot execute.
+  describe.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "when the browser cannot be signalled",
+    () => {
+      // A browser T3 cannot signal, as under AppArmor in an LXC container, must still exit.
+      it.live("asks the browser to close when the preview finishes instead of signalling it", () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const directory = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-fake-browser-",
+          });
+          const executable = path.join(directory, "chrome-headless-shell");
+          const exitRecord = path.join(directory, "exited");
+          yield* fileSystem.writeFileString(
+            executable,
+            `#!${process.execPath}
 const fs = require("node:fs");
 process.on("SIGTERM", () => {});
 const quit = () => { fs.writeFileSync(${JSON.stringify(exitRecord)}, "asked to close"); process.exit(0); };
@@ -348,16 +354,18 @@ fs.createReadStream(null, { fd: 3 }).on("end", quit).on("data", (chunk) => {
   }
 });
 `,
-        { mode: 0o755 },
+            { mode: 0o755 },
+          );
+
+          yield* HtmlRender.HtmlRender.use((htmlRender) =>
+            htmlRender.preview({ html: "<p>x</p>" }),
+          ).pipe(Effect.provide(layerHtmlRender(executable)));
+
+          const exitedBy = yield* fileSystem.readFileString(exitRecord).pipe(Effect.option);
+          expect(Option.getOrElse(exitedBy, () => "killed by a signal")).toBe("asked to close");
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
       );
-
-      yield* HtmlRender.HtmlRender.use((htmlRender) =>
-        htmlRender.preview({ html: "<p>x</p>" }),
-      ).pipe(Effect.provide(layerHtmlRender(executable)));
-
-      const exitedBy = yield* fileSystem.readFileString(exitRecord).pipe(Effect.option);
-      expect(Option.getOrElse(exitedBy, () => "killed by a signal")).toBe("asked to close");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    },
   );
 
   it.live("matches preview media queries and text colors to the requested appearance", (ctx) =>
